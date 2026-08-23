@@ -1,0 +1,152 @@
+{
+  "manifestVersion": 1,
+  "id": "azdo-secure-chat",
+  "publisher": "REPLACE_WITH_YOUR_PUBLISHER_ID",
+  "version": "0.7.1",
+  "name": "Team Chat",
+  "description": "Team chat inside Azure DevOps. Direct messages and channels, file sharing, and work item / pull request / commit mentions. No external server. Messages are NOT encrypted.",
+  "public": false,
+  "categories": [
+    "Azure Boards",
+    "Azure Repos"
+  ],
+  "tags": [
+    "chat",
+    "messaging",
+    "encryption",
+    "e2ee",
+    "collaboration",
+    "privacy"
+  ],
+  "targets": [
+    {
+      "id": "Microsoft.VisualStudio.Services"
+    }
+  ],
+  "icons": {
+    "default": "static/logo.png"
+  },
+  "content": {
+    "details": {
+      "path": "overview.md"
+    }
+  },
+  "links": {
+    "getstarted": {
+      "uri": "https://example.invalid/secure-chat/docs"
+    },
+    "support": {
+      "uri": "https://example.invalid/secure-chat/support"
+    }
+  },
+  "branding": {
+    "color": "#1f2733",
+    "theme": "dark"
+  },
+  "scopes": [
+    "vso.profile",
+    "vso.identity",
+    "vso.work",
+    "vso.code",
+    "vso.extension.data_write",
+    "vso.project"
+  ],
+  "files": [
+    {
+      "path": "dist",
+      "addressable": true
+    },
+    {
+      "path": "static",
+      "addressable": true
+    }
+  ],
+  "contributions": [
+    {
+      "id": "chat-hub-group",
+      "type": "ms.vss-web.hub-group",
+      "description": "Top level navigation entry for Secure Chat",
+      "targets": [
+        "ms.vss-web.project-hub-groups-collection"
+      ],
+      "properties": {
+        "name": "Chat",
+        "order": 90,
+        "icon": "asset://static/nav-icon.png"
+      }
+    },
+    {
+      "id": "chat-hub",
+      "type": "ms.vss-web.hub",
+      "description": "The Secure Chat conversation surface",
+      "targets": [
+        ".chat-hub-group"
+      ],
+      "properties": {
+        "name": "Messages",
+        "order": 10,
+        "uri": "dist/hub/Hub.html",
+        "iconName": "CommentSolid",
+        "supportsMobile": true
+      }
+    },
+    {
+      "id": "chat-unread-widget",
+      "type": "ms.vss-dashboards-web.widget",
+      "description": "Dashboard widget showing the unread message badge",
+      "targets": [
+        "ms.vss-dashboards-web.widget-catalog",
+        ".chat-unread-widget-configuration"
+      ],
+      "properties": {
+        "name": "Secure Chat unread",
+        "description": "Shows how many unread Secure Chat messages you have and who they are from.",
+        "catalogIconUrl": "static/widget-icon.png",
+        "previewImageUrl": "static/widget-icon.png",
+        "uri": "dist/widget/Widget.html",
+        "supportedSizes": [
+          {
+            "rowSpan": 1,
+            "columnSpan": 2
+          }
+        ],
+        "supportedScopes": [
+          "project_team"
+        ]
+      }
+    },
+    {
+      "id": "discuss-work-item",
+      "type": "ms.vss-web.action",
+      "description": "Start or open a Secure Chat conversation about this work item",
+      "targets": [
+        "ms.vss-work-web.work-item-toolbar-menu",
+        "ms.vss-work-web.query-result-work-item-menu",
+        "ms.vss-work-web.backlog-item-menu"
+      ],
+      "properties": {
+        "text": "Discuss in Secure Chat",
+        "title": "Open a Secure Chat channel scoped to this work item",
+        "iconName": "CommentSolid",
+        "uri": "dist/actions/Actions.html",
+        "registeredObjectId": "discuss-work-item"
+      }
+    },
+    {
+      "id": "discuss-commit",
+      "type": "ms.vss-web.action",
+      "description": "Start or open a Secure Chat conversation about this commit",
+      "targets": [
+        "ms.vss-code-web.git-commit-details-menu",
+        "ms.vss-code-web.git-commit-list-menu"
+      ],
+      "properties": {
+        "text": "Discuss in Secure Chat",
+        "title": "Open a Secure Chat channel scoped to this commit",
+        "iconName": "CommentSolid",
+        "uri": "dist/actions/Actions.html",
+        "registeredObjectId": "discuss-commit"
+      }
+    }
+  ]
+}

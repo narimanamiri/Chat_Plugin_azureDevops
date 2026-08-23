@@ -1,0 +1,42 @@
+{
+  "name": "azdo-secure-chat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end encrypted team chat extension for Azure DevOps Server and Services",
+  "license": "MIT",
+  "scripts": {
+    "clean": "rimraf dist bin",
+    "typecheck": "tsc --noEmit",
+    "build": "webpack --mode production",
+    "build:dev": "webpack --mode development",
+    "watch": "webpack --mode development --watch",
+    "test": "tsc -p tsconfig.test.json && node -e \"require('fs').writeFileSync('tests/build/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node --test tests/mentions.test.mjs tests/integration.test.mjs && node tests/fuzz.mjs",
+    "package": "npm run build && tfx extension create --manifest-globs azure-devops-extension.json --output-path ./bin",
+    "package:dev": "npm run build:dev && tfx extension create --manifest-globs azure-devops-extension.json --overrides-file configs/dev.json --output-path ./bin",
+    "icons": "python scripts/make_icons.py",
+    "fuzz": "tsc -p tsconfig.test.json && node tests/fuzz.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.3.0",
+    "@noble/curves": "^2.3.0",
+    "@noble/hashes": "^2.3.0",
+    "azure-devops-extension-api": "^4.267.0",
+    "azure-devops-extension-sdk": "^4.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "copy-webpack-plugin": "^12.0.2",
+    "css-loader": "^7.1.2",
+    "html-webpack-plugin": "^5.6.8",
+    "rimraf": "^6.0.1",
+    "style-loader": "^4.0.0",
+    "tfx-cli": "^0.21.1",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.6.3",
+    "webpack": "^5.96.1",
+    "webpack-cli": "^5.1.4"
+  }
+}
