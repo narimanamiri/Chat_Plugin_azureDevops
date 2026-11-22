@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "azdo-secure-chat",
   "publisher": "REPLACE_WITH_YOUR_PUBLISHER_ID",
-  "version": "0.7.1",
+  "version": "1.0.0",
   "name": "Team Chat",
   "description": "Team chat inside Azure DevOps. Direct messages and channels, file sharing, and work item / pull request / commit mentions. No external server. Messages are NOT encrypted.",
   "public": false,

@@ -23,6 +23,7 @@ import {
   AttachmentManifest,
   BlobChunkDoc,
   CHUNK_BYTES,
+  CHUNK_CONCURRENCY,
   COLLECTIONS,
   MAX_ATTACHMENT_BYTES,
 } from "./model";
@@ -32,6 +33,56 @@ const chunkDocId = (blobId: string, index: number) =>
   `${blobId}_${String(index).padStart(5, "0")}`;
 
 export type ProgressFn = (done: number, total: number) => void;
+
+/**
+ * Run `work` over every index with a small fixed concurrency.
+ *
+ * A 16 MB attachment is 256 chunk documents. Written one at a time that is
+ * 256 sequential round trips - on a server 80 ms away, twenty seconds of
+ * apparent hang. Four at a time is a four-fold improvement without turning
+ * one upload into a burst the service will throttle.
+ */
+async function pooled(
+  count: number,
+  work: (index: number) => Promise<void>,
+  onDone?: (completed: number, total: number) => void
+): Promise<void> {
+  let next = 0;
+  let completed = 0;
+  const lanes = Array.from({ length: Math.min(CHUNK_CONCURRENCY, count) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= count) return;
+      await work(index);
+      onDone?.(++completed, count);
+    }
+  });
+  // Promise.all rejects on the first failure, but the other lanes keep
+  // running; awaiting them all means a partial upload never leaves a
+  // dangling write that lands after the error was reported.
+  const results = await Promise.allSettled(lanes);
+  const failed = results.find((r) => r.status === "rejected");
+  if (failed && failed.status === "rejected") throw failed.reason;
+}
+
+/** True for the image types a browser will render inline. */
+export function isImage(mime: string): boolean {
+  return /^image\/(png|jpeg|jpg|gif|webp|bmp|avif)$/i.test(mime);
+}
+
+/** Natural dimensions of an image file, or undefined if it is not one. */
+async function imageSize(file: File): Promise<{ width: number; height: number } | undefined> {
+  if (!isImage(file.type)) return undefined;
+  if (typeof createImageBitmap !== "function") return undefined;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close?.();
+    return size;
+  } catch {
+    return undefined;
+  }
+}
 
 export class Files {
   constructor(private readonly store: Store) {}
@@ -55,20 +106,23 @@ export class Files {
     const bytes = new Uint8Array(await file.arrayBuffer());
     const chunks = Math.max(1, Math.ceil(bytes.length / CHUNK_BYTES));
 
-    for (let index = 0; index < chunks; index++) {
-      const slice = bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES);
-      const doc: BlobChunkDoc = {
-        id: chunkDocId(blobId, index),
-        blobId,
-        convId,
-        index,
-        data: b64encode(slice),
-      };
-      await this.store.put(COLLECTIONS.blobs, doc);
-      onProgress?.(index + 1, chunks);
-    }
+    await pooled(
+      chunks,
+      async (index) => {
+        const slice = bytes.subarray(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES);
+        const doc: BlobChunkDoc = {
+          id: chunkDocId(blobId, index),
+          blobId,
+          convId,
+          index,
+          data: b64encode(slice),
+        };
+        await this.store.put(COLLECTIONS.blobs, doc);
+      },
+      onProgress
+    );
 
-    return {
+    const manifest: AttachmentManifest = {
       blobId,
       name: file.name,
       size: file.size,
@@ -77,19 +131,35 @@ export class Files {
       chunkBytes: CHUNK_BYTES,
       sha256: sha256(bytes),
     };
+
+    // Record pixel size for images so a preview can reserve its space and the
+    // message list does not jump as thumbnails decode.
+    const dims = await imageSize(file);
+    if (dims) {
+      manifest.width = dims.width;
+      manifest.height = dims.height;
+    }
+    return manifest;
   }
 
   async download(manifest: AttachmentManifest, onProgress?: ProgressFn): Promise<Blob> {
-    const parts: Uint8Array[] = [];
-    for (let index = 0; index < manifest.chunks; index++) {
-      const doc = await this.store.get<BlobChunkDoc>(
-        COLLECTIONS.blobs,
-        chunkDocId(manifest.blobId, index)
-      );
-      if (!doc) throw new Error(`Attachment chunk ${index + 1} of ${manifest.chunks} is missing.`);
-      parts.push(b64decode(doc.data));
-      onProgress?.(index + 1, manifest.chunks);
-    }
+    // Indexed rather than appended: the pool finishes chunks out of order,
+    // and concatenating them in completion order would corrupt the file.
+    const parts = new Array<Uint8Array>(manifest.chunks);
+    await pooled(
+      manifest.chunks,
+      async (index) => {
+        const doc = await this.store.get<BlobChunkDoc>(
+          COLLECTIONS.blobs,
+          chunkDocId(manifest.blobId, index)
+        );
+        if (!doc) {
+          throw new Error(`Attachment chunk ${index + 1} of ${manifest.chunks} is missing.`);
+        }
+        parts[index] = b64decode(doc.data);
+      },
+      onProgress
+    );
 
     const total = parts.reduce((n, p) => n + p.length, 0);
     const joined = new Uint8Array(total);
@@ -107,12 +177,21 @@ export class Files {
 
   /** Remove every chunk of a blob. Called when a message is deleted. */
   async remove(manifest: AttachmentManifest): Promise<void> {
-    for (let index = 0; index < manifest.chunks; index++) {
-      await this.store.remove(COLLECTIONS.blobs, chunkDocId(manifest.blobId, index));
-    }
+    await pooled(manifest.chunks, (index) =>
+      this.store.remove(COLLECTIONS.blobs, chunkDocId(manifest.blobId, index))
+    );
   }
 
-  /** Delete every chunk belonging to a conversation. */
+  /**
+   * Delete every chunk belonging to a conversation.
+   *
+   * COSTLY. `list` on the blob collection downloads every chunk document in
+   * the whole project collection, base64 payload included - megabytes, to
+   * delete kilobytes. It exists to catch chunks whose manifest was lost (an
+   * upload interrupted between its chunk writes and its message write), so
+   * it is a repair tool, not part of the normal delete path. Deleting a
+   * conversation walks its manifests instead; see ChatClient.
+   */
   async removeByConversation(convId: string): Promise<number> {
     const all = await this.store.list<BlobChunkDoc>(COLLECTIONS.blobs);
     let removed = 0;

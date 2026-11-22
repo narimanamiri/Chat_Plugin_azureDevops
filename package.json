@@ -1,6 +1,6 @@
 {
   "name": "azdo-secure-chat",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "End-to-end encrypted team chat extension for Azure DevOps Server and Services",
   "license": "MIT",
@@ -10,7 +10,7 @@
     "build": "webpack --mode production",
     "build:dev": "webpack --mode development",
     "watch": "webpack --mode development --watch",
-    "test": "tsc -p tsconfig.test.json && node -e \"require('fs').writeFileSync('tests/build/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node --test tests/mentions.test.mjs tests/integration.test.mjs && node tests/fuzz.mjs",
+    "test": "tsc -p tsconfig.test.json && node -e \"require('fs').writeFileSync('tests/build/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node --test tests/mentions.test.mjs tests/integration.test.mjs tests/features.test.mjs && node tests/fuzz.mjs",
     "package": "npm run build && tfx extension create --manifest-globs azure-devops-extension.json --output-path ./bin",
     "package:dev": "npm run build:dev && tfx extension create --manifest-globs azure-devops-extension.json --overrides-file configs/dev.json --output-path ./bin",
     "icons": "python scripts/make_icons.py",

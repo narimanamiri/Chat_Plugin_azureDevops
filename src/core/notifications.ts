@@ -2,14 +2,23 @@
  * notifications.ts - unread tracking and the polling loop.
  *
  * Azure DevOps offers extensions no push channel and no websocket, so new
- * messages are discovered by polling the conversation documents. That is one
- * cheap request per cycle: conversation documents carry `messageCount` and
- * `lastMessageId` in the clear, so unread counts are computed without
- * decrypting anything. The widget therefore works even when the user's keys
- * are locked.
+ * messages are discovered by polling. There are two cadences, because the
+ * two things we poll for have very different costs:
  *
- * Polling backs off hard when the tab is hidden, which matters because every
- * open Azure DevOps tab runs its own copy of this loop.
+ *   fast tick  - the ONE conversation document the user is looking at.
+ *                A single getDocument, so it can run every few seconds.
+ *                This is what makes an open conversation feel live, and it
+ *                also carries the typing indicator.
+ *
+ *   slow tick  - every conversation document in the collection, for the
+ *                sidebar and the unread badge. The data service has no
+ *                query language, so this is a whole-collection read; it is
+ *                bounded by conversation count, not history length, but it
+ *                is still the expensive call and must not run every five
+ *                seconds.
+ *
+ * Before 0.10.0 there was only the expensive cadence, running every twelve
+ * seconds in every open Azure DevOps tab.
  */
 
 import { COLLECTIONS, ConversationDoc, ReadStateDoc } from "./model";
@@ -55,7 +64,13 @@ export class ReadState {
 
     const active = conversations
       .filter((c) => perConversation[c.id] > 0)
-      .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1))
+      .sort((a, b) =>
+        a.lastActivityAt === b.lastActivityAt
+          ? a.id.localeCompare(b.id)
+          : a.lastActivityAt < b.lastActivityAt
+            ? 1
+            : -1
+      )
       .map((c) => ({
         convId: c.id,
         count: perConversation[c.id],
@@ -70,19 +85,65 @@ export class ReadState {
   async forget(convId: string): Promise<void> {
     const doc = await this.load();
     if (!(convId in doc.cursors)) return;
-    delete doc.cursors[convId];
-    await this.store.put(COLLECTIONS.readState, doc, "user");
+    this.doc = await this.write((base) => {
+      if (!(convId in base.cursors)) return null;
+      const cursors = { ...base.cursors };
+      delete cursors[convId];
+      return { ...base, cursors };
+    });
   }
 
-  /** Mark everything up to the conversation's current count as read. */
-  async markRead(conv: ConversationDoc): Promise<void> {
+  /**
+   * Mark everything up to the conversation's current count as read.
+   *
+   * Returns how many messages were unread beforehand, which the UI uses to
+   * place its unread divider.
+   *
+   * Two things matter here, both learned the hard way:
+   *
+   *  - it writes ONLY when the cursor actually moves. The open conversation
+   *    is re-read on every tick, and writing unconditionally meant one
+   *    server write every few seconds per open tab, forever, for no change.
+   *
+   *  - it writes through mutate, not put. The cached document holds the
+   *    __etag from the read that produced it, and put does not refresh it,
+   *    so the second write of a session failed with HTTP 409 - which
+   *    surfaced as an error when switching between two conversations.
+   *    mutate re-reads before writing, which also merges cursors across
+   *    tabs instead of clobbering them.
+   */
+  async markRead(conv: ConversationDoc): Promise<number> {
     const doc = await this.load();
-    doc.cursors[conv.id] = {
+    const previous = doc.cursors[conv.id]?.count ?? 0;
+    if (previous >= conv.messageCount) return 0;
+
+    const entry = {
       lastReadMessageId: conv.lastMessageId ?? "",
       lastReadAt: new Date().toISOString(),
       count: conv.messageCount,
     };
-    await this.store.put(COLLECTIONS.readState, doc, "user");
+    this.doc = await this.write((base) => {
+      const seen = base.cursors[conv.id]?.count ?? 0;
+      if (seen >= conv.messageCount) return null;
+      return { ...base, cursors: { ...base.cursors, [conv.id]: entry } };
+    });
+    return Math.max(0, conv.messageCount - previous);
+  }
+
+  private async write(
+    change: (base: ReadStateDoc) => ReadStateDoc | null
+  ): Promise<ReadStateDoc> {
+    const saved = await this.store.mutate<ReadStateDoc>(
+      COLLECTIONS.readState,
+      READ_STATE_DOC_ID,
+      (existing) => change(existing ?? ({ id: READ_STATE_DOC_ID, cursors: {} } as ReadStateDoc)),
+      "user"
+    );
+    // mutate hands back the stored document, carrying the etag the next
+    // write has to present. Caching anything else reintroduces the 409.
+    if (saved) return saved;
+    this.doc = undefined;
+    return this.load();
   }
 }
 
@@ -91,37 +152,55 @@ export class ReadState {
 /* ------------------------------------------------------------------ */
 
 export interface PollerOptions {
-  /** Base interval while the tab is visible. */
+  /** Full-list interval while the tab is visible. */
   activeSeconds: number;
-  /** Interval while the tab is hidden. */
+  /** Full-list interval while the tab is hidden. */
   idleSeconds: number;
+  /** Single-document interval for the conversation on screen. */
+  focusSeconds: number;
+  /** Which conversation is on screen, read fresh on every fast tick. */
+  focusId: () => string | undefined;
   onTick: (conversations: ConversationDoc[]) => void | Promise<void>;
+  onFocusTick?: (conv: ConversationDoc) => void | Promise<void>;
   onError?: (err: unknown) => void;
 }
 
 export class Poller {
-  private timer?: number;
+  private slowTimer?: number;
+  private fastTimer?: number;
   private stopped = false;
   private consecutiveErrors = 0;
+  /** messageCount plus typing state last seen for the focused document. */
+  private focusFingerprint = "";
 
   constructor(private readonly store: Store, private readonly options: PollerOptions) {}
 
   start(): void {
     this.stopped = false;
     void this.cycle();
+    void this.focusCycle();
     document.addEventListener("visibilitychange", this.onVisibility);
   }
 
   stop(): void {
     this.stopped = true;
-    if (this.timer) window.clearTimeout(this.timer);
+    if (this.slowTimer) window.clearTimeout(this.slowTimer);
+    if (this.fastTimer) window.clearTimeout(this.fastTimer);
     document.removeEventListener("visibilitychange", this.onVisibility);
   }
 
-  /** Force an immediate refresh, e.g. right after sending a message. */
+  /** Force an immediate refresh of both cadences, e.g. right after sending. */
   kick(): void {
-    if (this.timer) window.clearTimeout(this.timer);
+    this.focusFingerprint = "";
+    if (this.slowTimer) window.clearTimeout(this.slowTimer);
+    if (this.fastTimer) window.clearTimeout(this.fastTimer);
     void this.cycle();
+    void this.focusCycle();
+  }
+
+  /** Forget the focus fingerprint so the next fast tick reports regardless. */
+  resetFocus(): void {
+    this.focusFingerprint = "";
   }
 
   private onVisibility = () => {
@@ -146,7 +225,43 @@ export class Poller {
       this.options.onError?.(err);
     } finally {
       if (!this.stopped) {
-        this.timer = window.setTimeout(() => void this.cycle(), this.intervalMs);
+        this.slowTimer = window.setTimeout(() => void this.cycle(), this.intervalMs);
+      }
+    }
+  }
+
+  /**
+   * The cheap loop. One document, and the callback only fires when something
+   * in it actually changed - so an idle conversation costs one small read
+   * and no re-render.
+   */
+  private async focusCycle(): Promise<void> {
+    if (this.stopped) return;
+    try {
+      const id = this.options.focusId();
+      if (id && !document.hidden) {
+        const conv = await this.store.get<ConversationDoc>(COLLECTIONS.conversations, id);
+        if (conv) {
+          const fingerprint = [
+            conv.id,
+            conv.messageCount,
+            conv.lastMessageId ?? "",
+            JSON.stringify(conv.typing ?? {}),
+          ].join("|");
+          if (fingerprint !== this.focusFingerprint) {
+            this.focusFingerprint = fingerprint;
+            await this.options.onFocusTick?.(conv);
+          }
+        }
+      }
+    } catch (err) {
+      this.options.onError?.(err);
+    } finally {
+      if (!this.stopped) {
+        this.fastTimer = window.setTimeout(
+          () => void this.focusCycle(),
+          Math.max(2000, this.options.focusSeconds * 1000)
+        );
       }
     }
   }
@@ -164,18 +279,28 @@ export async function requestDesktopPermission(): Promise<boolean> {
 }
 
 /**
- * Message bodies are end to end encrypted, and the point of that is defeated
- * if the plaintext is handed to the operating system's notification centre.
- * So the toast names the sender and the conversation and nothing else.
+ * The toast names the sender and the conversation, never the message text.
+ *
+ * Message bodies are no longer encrypted, but a desktop notification is
+ * rendered by the operating system on a possibly shared screen - which is a
+ * different exposure from a chat window the reader chose to open.
+ *
+ * The tag is the conversation id rather than its title: two conversations
+ * with the same title would otherwise replace each other's toasts.
  */
-export function notifyNewMessages(senderName: string, conversationTitle: string, count: number): void {
+export function notifyNewMessages(
+  senderName: string,
+  conversationTitle: string,
+  count: number,
+  convId?: string
+): void {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   const body =
     count === 1
       ? `${senderName} sent a message`
       : `${senderName} and others sent ${count} messages`;
   try {
-    new Notification(conversationTitle, { body, tag: conversationTitle, silent: false });
+    new Notification(conversationTitle, { body, tag: convId ?? conversationTitle, silent: false });
   } catch {
     /* some browsers reject notifications from inside an iframe */
   }

@@ -1,0 +1,18 @@
+# Keep the knowledge graph about CODE.
+#
+# The prose docs below describe the removed encrypted design (README.md, docs/01-08)
+# or are prose themselves (overview.md, docs/ai-handoff). Parsing their headings
+# into graph nodes put false architecture concepts (keyring, epochs, ECDH...) into
+# the graph and drowned the real structure.
+README.md
+overview.md
+docs/
+
+# Config files whose keys/values are noise as graph nodes.
+package.json
+package-lock.json
+tsconfig.json
+tsconfig.test.json
+
+# Vendored / third-party artefacts.
+vsix/

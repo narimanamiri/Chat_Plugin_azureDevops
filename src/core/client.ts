@@ -12,7 +12,7 @@
 
 import * as SDK from "azure-devops-extension-sdk";
 
-import { Conversations } from "./conversations";
+import { Conversations, activeTypers } from "./conversations";
 import { Files } from "./files";
 import { Messages } from "./messages";
 import { Poller, ReadState, UnreadSummary } from "./notifications";
@@ -35,19 +35,33 @@ import {
   DecryptedMessage,
   MessageBody,
   NAMESPACE,
+  PRESENCE_FRESH_MS,
+  PRESENCE_WRITE_MS,
   ProfileDoc,
+  SearchHit,
+  TYPING_WRITE_MS,
 } from "./model";
 
 /** Kept in step with the manifest so a support dump names the build. */
-export const EXTENSION_VERSION = "0.7.1";
+export const EXTENSION_VERSION = "1.0.0";
 
 /** Ceiling for conversation creation, which is a couple of dependent writes. */
 const CONVERSATION_TIMEOUT_MS = 30_000;
 
 export interface ChatClientOptions {
+  /** Whole-collection refresh for the sidebar and badge. */
   activeSeconds?: number;
+  /** Whole-collection refresh while the tab is hidden. */
   idleSeconds?: number;
+  /** Single-document refresh for the conversation on screen. */
+  focusSeconds?: number;
 }
+
+/** Budget for one search, in page documents read. */
+const SEARCH_PAGE_BUDGET = 60;
+
+/** Conversations a single search will look inside, most recent first. */
+const SEARCH_CONVERSATION_LIMIT = 40;
 
 export interface Person {
   userId: string;
@@ -66,6 +80,9 @@ export class ChatClient {
   private directory?: DirectoryResult;
   private ready = false;
   private warmPromise?: Promise<void>;
+  private profiles = new Map<string, ProfileDoc>();
+  private lastPresenceWrite = 0;
+  private lastTypingWrite = new Map<string, number>();
 
   private user = { id: "", displayName: "" };
 
@@ -122,20 +139,27 @@ export class ChatClient {
     try {
       await this.publishProfile();
     } catch (err) {
-      console.warn("[secure-chat] could not publish profile", err);
+      console.warn("[team-chat] could not publish profile", err);
     }
     primeDirectory();
     try {
       await this.loadProfiles();
     } catch (err) {
-      console.warn("[secure-chat] could not load profiles", err);
+      console.warn("[team-chat] could not load profiles", err);
     }
 
     // Once the directory arrives we may finally know our own real name.
     // Publish it then, and repair a profile previously written with an id.
-    void collectionMembers()
-      .then(() => this.publishProfile())
-      .catch((err) => console.warn("[secure-chat] profile repair failed", err));
+    //
+    // Awaited as part of warmUp - which init() does NOT await - so startup
+    // stays fast while `whenWarm()` still covers it. Left dangling, this
+    // read-and-write landed at an arbitrary later moment.
+    try {
+      await collectionMembers();
+      await this.publishProfile();
+    } catch (err) {
+      console.warn("[team-chat] profile repair failed", err);
+    }
   }
 
   /**
@@ -169,31 +193,64 @@ export class ChatClient {
       // stick: once stored, every client reads it back as the person's name
       // forever. Better to publish nothing and try again once the directory
       // has loaded.
-      console.warn("[secure-chat] display name unknown; not publishing a profile yet");
+      console.warn("[team-chat] display name unknown; not publishing a profile yet");
       return;
     }
 
     const existing = await this.store.get<ProfileDoc>(COLLECTIONS.profiles, this.user.id);
+    const seenAgo = existing?.lastSeenAt ? Date.now() - Date.parse(existing.lastSeenAt) : Infinity;
     if (
       existing &&
       existing.displayName === name &&
-      existing.appVersion === EXTENSION_VERSION
+      existing.appVersion === EXTENSION_VERSION &&
+      seenAgo < PRESENCE_WRITE_MS
     ) {
       return;
     }
-    await this.store.put<ProfileDoc>(COLLECTIONS.profiles, {
+    const now = new Date().toISOString();
+    await this.store.mutate<ProfileDoc>(COLLECTIONS.profiles, this.user.id, (current) => ({
+      ...(current ?? { id: this.user.id }),
       id: this.user.id,
       userId: this.user.id,
       displayName: name,
       appVersion: EXTENSION_VERSION,
       namespace: NAMESPACE,
-      updatedAt: new Date().toISOString(),
-    });
+      updatedAt: now,
+      lastSeenAt: now,
+    }));
+    this.lastPresenceWrite = Date.now();
+  }
+
+  /**
+   * Refresh our own lastSeenAt, rate limited hard.
+   *
+   * Called when the tab becomes visible and on the slow poll tick. One
+   * write per user per five minutes is a cost worth paying for a "last
+   * seen" line; a heartbeat would not be.
+   */
+  async touchPresence(): Promise<void> {
+    if (!this.ready) return;
+    if (Date.now() - this.lastPresenceWrite < PRESENCE_WRITE_MS) return;
+    this.lastPresenceWrite = Date.now();
+    try {
+      await this.publishProfile();
+    } catch (err) {
+      console.warn("[team-chat] presence write failed", err);
+    }
+  }
+
+  /** When someone was last seen, if their profile says and it is fresh. */
+  presenceOf(userId: string): { lastSeenAt?: string; online: boolean } {
+    const at = this.profiles.get(userId)?.lastSeenAt;
+    if (!at) return { online: false };
+    const age = Date.now() - Date.parse(at);
+    return { lastSeenAt: at, online: Number.isFinite(age) && age < PRESENCE_FRESH_MS };
   }
 
   private async loadProfiles(): Promise<ProfileDoc[]> {
     const profiles = await this.store.list<ProfileDoc>(COLLECTIONS.profiles);
     for (const profile of profiles) {
+      this.profiles.set(profile.userId, profile);
       // A profile written by an older build may carry an id as its name.
       // Ignore it so the directory gets a chance to supply a real one.
       if (looksLikeIdentityId(profile.displayName)) continue;
@@ -203,7 +260,7 @@ export class ChatClient {
   }
 
   private requireReady(): { conv: Conversations; msg: Messages } {
-    if (!this.ready) throw new Error("Secure Chat is still starting.");
+    if (!this.ready) throw new Error("Team Chat is still starting.");
     return { conv: this.conversations, msg: this.messages };
   }
 
@@ -340,6 +397,11 @@ export class ChatClient {
     return this.requireReady().conv.get(convId);
   }
 
+  async renameConversation(convId: string, title: string): Promise<void> {
+    await this.requireReady().conv.rename(convId, title);
+    this.poller?.kick();
+  }
+
   /* -------------------------------------------------------------- */
   /* messages                                                       */
   /* -------------------------------------------------------------- */
@@ -349,8 +411,9 @@ export class ChatClient {
     // Names must be in hand BEFORE rendering. Profiles load in the
     // background, so a conversation opened immediately after startup would
     // otherwise show raw identity ids for its authors.
-    await this.ensureNamesFor(await conv.get(convId));
-    return msg.recent(convId, limit);
+    const doc = await conv.get(convId);
+    await this.ensureNamesFor(doc);
+    return msg.recent(convId, limit, doc);
   }
 
   /** Load profiles if any participant of `conv` is still unnamed. */
@@ -377,8 +440,126 @@ export class ChatClient {
     return result;
   }
 
-  editMessage(convId: string, messageId: string, body: MessageBody): Promise<void> {
-    return this.requireReady().msg.edit(convId, messageId, body);
+  /**
+   * Like `recent`, but also reports the conversation's true message count so
+   * the UI knows whether earlier messages exist.
+   */
+  async recentWindow(
+    convId: string,
+    limit?: number
+  ): Promise<{ items: DecryptedMessage[]; total: number }> {
+    const { conv, msg } = this.requireReady();
+    const doc = await conv.get(convId);
+    await this.ensureNamesFor(doc);
+    return msg.window(convId, limit, doc);
+  }
+
+  async editMessage(convId: string, messageId: string, body: MessageBody): Promise<void> {
+    await this.requireReady().msg.edit(convId, messageId, body);
+    this.poller?.resetFocus();
+  }
+
+  /** Toggle one of our reactions on a message. */
+  async react(convId: string, messageId: string, emoji: string): Promise<Record<string, string[]>> {
+    const result = await this.requireReady().msg.react(convId, messageId, emoji);
+    // Reactions live inside the page document, which the focus poller does
+    // not fingerprint - without this the change would not come back for up
+    // to one slow tick.
+    this.poller?.resetFocus();
+    return result;
+  }
+
+  /* -------------------------------------------------------------- */
+  /* typing                                                         */
+  /* -------------------------------------------------------------- */
+
+  /**
+   * Publish that we are typing, at most once every TYPING_WRITE_MS per
+   * conversation. Clearing the flag is never throttled, so the dot always
+   * goes away promptly.
+   */
+  async setTyping(convId: string, active: boolean): Promise<void> {
+    if (!this.ready) return;
+    if (active) {
+      const last = this.lastTypingWrite.get(convId) ?? 0;
+      if (Date.now() - last < TYPING_WRITE_MS) return;
+      this.lastTypingWrite.set(convId, Date.now());
+    } else {
+      this.lastTypingWrite.delete(convId);
+    }
+    await this.conversations.setTyping(convId, active);
+  }
+
+  /**
+   * Display names of everybody except us currently typing in `conv`.
+   *
+   * Anyone whose name is not known yet is dropped rather than rendered as a
+   * raw identity id. A SID in the typing line is worse than no typing line,
+   * and this is the one place that reads names without having first gone
+   * through `ensureNamesFor`.
+   */
+  typersIn(conv: Pick<ConversationDoc, "typing">): string[] {
+    return activeTypers(conv, this.user.id)
+      .map((id) => this.nameOf(id))
+      .filter((name) => !looksLikeIdentityId(name));
+  }
+
+  /* -------------------------------------------------------------- */
+  /* search                                                         */
+  /* -------------------------------------------------------------- */
+
+  /**
+   * Substring search across the conversations this user is in.
+   *
+   * The data service cannot query, so this reads page documents. The cost
+   * is therefore bounded explicitly rather than by how much history exists:
+   * the newest SEARCH_CONVERSATION_LIMIT conversations are visited newest
+   * first, and the whole call stops after SEARCH_PAGE_BUDGET page reads.
+   * `truncated` tells the UI to say so rather than imply the result is
+   * complete.
+   */
+  async searchMessages(
+    query: string,
+    limit = 60
+  ): Promise<{ hits: SearchHit[]; truncated: boolean }> {
+    const needle = query.trim();
+    if (needle.length < 2) return { hits: [], truncated: false };
+
+    const { conv, msg } = this.requireReady();
+    const docs = (await conv.mine()).slice(0, SEARCH_CONVERSATION_LIMIT);
+    await this.loadProfiles().catch(() => undefined);
+
+    const hits: SearchHit[] = [];
+    let budget = SEARCH_PAGE_BUDGET;
+    let truncated = false;
+
+    for (const doc of docs) {
+      if (budget <= 0 || hits.length >= limit) {
+        truncated = true;
+        break;
+      }
+      const title = conv.toView(doc, 0, this.nameOf).title;
+      const { hits: found, pagesRead } = await msg.search(doc.id, needle, budget);
+      budget -= pagesRead;
+      for (const message of found) {
+        if (hits.length >= limit) {
+          truncated = true;
+          break;
+        }
+        hits.push({ convId: doc.id, convTitle: title, message });
+      }
+    }
+
+    // Newest first. The comparator must return 0 for ties: messages sent in
+    // the same millisecond are common, and a comparator that claims a < b
+    // for every pair lets the sort reorder them arbitrarily.
+    hits.sort((a, b) => {
+      if (a.message.sentAt !== b.message.sentAt) {
+        return a.message.sentAt < b.message.sentAt ? 1 : -1;
+      }
+      return (b.message.seq ?? 0) - (a.message.seq ?? 0);
+    });
+    return { hits, truncated };
   }
 
   async deleteMessage(
@@ -411,6 +592,36 @@ export class ChatClient {
     return this.files.download(manifest, onProgress);
   }
 
+  /**
+   * An object URL for an image attachment, cached per blob.
+   *
+   * Images are reassembled from chunk documents, which is far too expensive
+   * to repeat on every render - and every poll tick re-renders the list.
+   */
+  private imageUrls = new Map<string, Promise<string>>();
+
+  imageUrl(manifest: AttachmentManifest): Promise<string> {
+    const hit = this.imageUrls.get(manifest.blobId);
+    if (hit) return hit;
+    const promise = this.files
+      .download(manifest)
+      .then((blob) => URL.createObjectURL(blob))
+      .catch((err) => {
+        this.imageUrls.delete(manifest.blobId);
+        throw err;
+      });
+    this.imageUrls.set(manifest.blobId, promise);
+    return promise;
+  }
+
+  /** Release cached object URLs. Called when the page unloads. */
+  releaseImageUrls(): void {
+    for (const promise of this.imageUrls.values()) {
+      void promise.then((url) => URL.revokeObjectURL(url)).catch(() => undefined);
+    }
+    this.imageUrls.clear();
+  }
+
   /* -------------------------------------------------------------- */
   /* deletion                                                       */
   /* -------------------------------------------------------------- */
@@ -439,15 +650,16 @@ export class ChatClient {
       try {
         await this.files.remove(manifest);
       } catch (err) {
-        console.warn("[secure-chat] attachment removal failed", err);
+        console.warn("[team-chat] attachment removal failed", err);
       }
     }
-    let chunksSwept = 0;
-    try {
-      chunksSwept = await this.files.removeByConversation(convId);
-    } catch (err) {
-      console.warn("[secure-chat] chunk sweep failed", err);
-    }
+    // No collection-wide sweep here. `removeByConversation` downloads EVERY
+    // chunk document in the project collection, base64 payload and all, to
+    // delete the handful belonging to this conversation - megabytes of
+    // transfer to free kilobytes. The manifests above already name every
+    // chunk a message referenced; anything else is an orphan from an
+    // interrupted upload, which `sweepOrphanChunks` cleans up on request.
+    const chunksSwept = 0;
 
     const pagesRemoved = await msg.purgePages(convId, doc.messageCount);
     await conv.removeDocument(convId);
@@ -461,24 +673,56 @@ export class ChatClient {
     return { attachmentsRemoved: manifests.length, chunksSwept, pagesRemoved };
   }
 
+  /**
+   * Sweep attachment chunks no live message refers to.
+   *
+   * Explicitly NOT on the delete path: it reads every chunk document in the
+   * collection. Offered as a maintenance action, reachable from the console
+   * as `secureChatSweep()`, for an install that has accumulated orphans
+   * from interrupted uploads.
+   */
+  async sweepOrphanChunks(): Promise<number> {
+    const { conv, msg } = this.requireReady();
+    const live = new Set<string>();
+    for (const doc of await conv.mine()) {
+      for (const manifest of await msg.allAttachments(doc.id)) live.add(manifest.blobId);
+    }
+    return this.files.collectGarbage(live);
+  }
+
   /* -------------------------------------------------------------- */
   /* polling                                                        */
   /* -------------------------------------------------------------- */
 
+  /**
+   * Start both poll cadences.
+   *
+   * `onUpdate` is the sidebar and badge, driven by the expensive
+   * whole-collection read. `onFocus` is the open conversation, driven by a
+   * single-document read that only calls back when that document actually
+   * changed - so an idle conversation costs one small request and no
+   * re-render.
+   */
   startPolling(
     onUpdate: (unread: UnreadSummary, conversations: ConversationDoc[]) => void,
+    focusId: () => string | undefined,
+    onFocus?: (conv: ConversationDoc) => void | Promise<void>,
     options: ChatClientOptions = {}
   ): void {
     this.requireReady();
     this.poller?.stop();
     this.poller = new Poller(this.store, {
-      activeSeconds: options.activeSeconds ?? 12,
-      idleSeconds: options.idleSeconds ?? 60,
+      activeSeconds: options.activeSeconds ?? 30,
+      idleSeconds: options.idleSeconds ?? 120,
+      focusSeconds: options.focusSeconds ?? 5,
+      focusId,
       onTick: async (all) => {
         const mine = all.filter((c) => c.members.includes(this.user.id));
         onUpdate(await this.readState.summarise(mine, this.user.id), mine);
+        void this.touchPresence();
       },
-      onError: (err) => console.warn("[secure-chat] poll failed", err),
+      onFocusTick: onFocus,
+      onError: (err) => console.warn("[team-chat] poll failed", err),
     });
     this.poller.start();
   }
@@ -492,9 +736,10 @@ export class ChatClient {
     this.poller?.kick();
   }
 
-  async markRead(convId: string): Promise<void> {
+  /** Returns how many messages had been unread, for the UI divider. */
+  async markRead(convId: string): Promise<number> {
     const doc = await this.requireReady().conv.get(convId);
-    if (doc) await this.readState.markRead(doc);
+    return doc ? this.readState.markRead(doc) : 0;
   }
 
   /* -------------------------------------------------------------- */
@@ -545,11 +790,17 @@ export async function bootstrap(): Promise<ChatClient> {
   await SDK.init({ loaded: false, applyTheme: true });
   await SDK.ready();
   const client = await withTimeout(ChatClient.create(), 30_000, "Connecting to Azure DevOps");
-  await withTimeout(client.init(), 30_000, "Starting Secure Chat");
-  (window as unknown as Record<string, unknown>).secureChatDiagnose = async () => {
+  await withTimeout(client.init(), 30_000, "Starting Team Chat");
+  const globals = window as unknown as Record<string, unknown>;
+  globals.secureChatDiagnose = async () => {
     const report = await client.diagnose();
     console.log(JSON.stringify(report, null, 2));
     return report;
+  };
+  globals.secureChatSweep = async () => {
+    const removed = await client.sweepOrphanChunks();
+    console.log(`[team-chat] swept ${removed} orphan chunk document(s)`);
+    return removed;
   };
   SDK.notifyLoadSucceeded();
   return client;

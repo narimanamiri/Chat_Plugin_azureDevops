@@ -9,6 +9,7 @@ import * as SDK from "azure-devops-extension-sdk";
 import {
   CommonServiceIds,
   IHostNavigationService,
+  ILocationService,
   IProjectInfo,
   IProjectPageService,
   getClient,
@@ -35,14 +36,56 @@ export function currentProject(): Promise<IProjectInfo | undefined> {
   return projectPromise;
 }
 
-/** Base web URL of this Azure DevOps organisation or collection. */
+/**
+ * Base web URL of this Azure DevOps organisation or collection.
+ *
+ * NOT `window.location.origin`. An extension runs in a sandboxed iframe
+ * served from a different origin than the product - `*.gallerycdn.vsassets.io`
+ * on Services, a separate path on Server - so a URL built from our own
+ * location points at the sandbox, not at Azure DevOps.
+ *
+ * The host tells us where it lives through the location service. The Core
+ * resource area resolves to the collection root, which is exactly the prefix
+ * a hub URL needs.
+ */
 export async function hostBaseUrl(): Promise<string> {
-  const context = SDK.getHost();
-  // On Services this is https://dev.azure.com/{org}; on Server it is the
-  // collection URL. Both are exposed through the page context.
-  const anyWindow = window as unknown as { location: Location };
-  const origin = anyWindow.location.origin;
-  return context.name ? `${origin}` : origin;
+  const location = await SDK.getService<ILocationService>(CommonServiceIds.LocationService);
+  const base = await location.getResourceAreaLocation(CoreRestClient.RESOURCE_AREA_ID);
+  return base.replace(/\/+$/, "");
+}
+
+/**
+ * Absolute URL of one of this extension's own hubs.
+ *
+ * `contribution` is the id as declared in the manifest, e.g. "chat-hub";
+ * the publisher and extension parts come from the SDK at runtime, because
+ * they differ between a dev build and a release.
+ */
+export async function hubUrl(contribution: string, projectName?: string): Promise<string> {
+  const extensionId = SDK.getExtensionContext().id;
+  const project = projectName ?? (await currentProject())?.name;
+  const base = await hostBaseUrl();
+  const scope = project ? `/${encodeURIComponent(project)}` : "";
+  return `${base}${scope}/_apps/hub/${extensionId}.${contribution}`;
+}
+
+/**
+ * Navigate to one of our hubs, tolerating a host that cannot resolve its
+ * own location - in that case fall back to a page-relative guess rather
+ * than doing nothing at all.
+ */
+export async function navigateToHub(contribution: string): Promise<void> {
+  try {
+    await navigateTo(await hubUrl(contribution));
+  } catch (err) {
+    console.warn("[team-chat] could not resolve the hub URL", err);
+    const extensionId = SDK.getExtensionContext().id;
+    const project = (await currentProject())?.name;
+    const scope = project ? `/${encodeURIComponent(project)}` : "";
+    await navigateTo(
+      `${window.location.origin}${scope}/_apps/hub/${extensionId}.${contribution}`
+    );
+  }
 }
 
 export async function navigateTo(url: string): Promise<void> {

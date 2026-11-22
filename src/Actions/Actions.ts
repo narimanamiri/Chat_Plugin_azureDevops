@@ -1,5 +1,5 @@
 /**
- * Actions.ts - the "Discuss in Secure Chat" menu items.
+ * Actions.ts - the "Discuss in Team Chat" menu items.
  *
  * These run in a hidden frame with no UI, so they cannot render a
  * conversation themselves. Instead the action records the target in
@@ -8,17 +8,13 @@
  */
 
 import * as SDK from "azure-devops-extension-sdk";
-import {
-  CommonServiceIds,
-  IHostNavigationService,
-  IProjectPageService,
-} from "azure-devops-extension-api";
 
 import { getStore } from "@core/storage";
 import type { ConversationSubject } from "@core/model";
 import {
   firstCommitId,
   firstWorkItemId,
+  navigateToHub,
   type CommitActionContext,
   type WorkItemActionContext,
 } from "@core/devops";
@@ -29,17 +25,7 @@ async function park(subject: ConversationSubject, title: string): Promise<void> 
   const store = await getStore();
   await store.setValue(PENDING_SUBJECT_KEY, { subject, title }, "user");
 
-  const [nav, projectService] = await Promise.all([
-    SDK.getService<IHostNavigationService>(CommonServiceIds.HostNavigationService),
-    SDK.getService<IProjectPageService>(CommonServiceIds.ProjectPageService),
-  ]);
-  const project = await projectService.getProject();
-  const extensionId = SDK.getExtensionContext().id;
-  if (!project) return;
-
-  nav.navigate(
-    `${window.location.origin}/${encodeURIComponent(project.name)}/_apps/hub/${extensionId}.chat-hub`
-  );
+  await navigateToHub("chat-hub");
 }
 
 void (async () => {

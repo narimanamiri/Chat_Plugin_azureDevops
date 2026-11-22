@@ -436,3 +436,106 @@ test("a profile poisoned by an older build is ignored in favour of the directory
     );
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* efficiency and paging                                               */
+/* ------------------------------------------------------------------ */
+
+test("an idle poll tick performs no writes", async () => {
+  // markRead used to write unconditionally, so every open tab wrote to the
+  // server every twelve seconds forever, for no change.
+  const convId = await asAlice(async (alice) => {
+    const doc = await alice.openDirect(BOB.id);
+    await alice.send(doc.id, { text: "hello" });
+    return doc.id;
+  });
+
+  await asBob(async (bob) => {
+    await bob.recent(convId);
+    await bob.markRead(convId);
+
+    const before = { ...harness.state.calls };
+    for (let tick = 0; tick < 5; tick++) {
+      await bob.listConversations();
+      await bob.recent(convId);
+      await bob.markRead(convId);
+    }
+    const writes = harness.state.calls.set - before.set;
+    assert.equal(writes, 0, `idle ticks must not write, saw ${writes}`);
+  });
+});
+
+test("markRead reports how many messages were unread", async () => {
+  const convId = await asAlice(async (alice) => {
+    const doc = await alice.openDirect(BOB.id);
+    for (let i = 0; i < 4; i++) await alice.send(doc.id, { text: `m${i}` });
+    return doc.id;
+  });
+
+  await asBob(async (bob) => {
+    const unread = await bob.markRead(convId);
+    assert.equal(unread, 4, "the UI positions its divider from this number");
+    assert.equal(await bob.markRead(convId), 0, "nothing new the second time");
+  });
+});
+
+test("older messages load a page at a time", async () => {
+  const convId = await asAlice(async (alice) => {
+    const doc = await alice.openDirect(BOB.id);
+    for (let i = 0; i < 150; i++) await alice.send(doc.id, { text: `message ${i}` });
+    return doc.id;
+  });
+
+  await asBob(async (bob) => {
+    const firstPage = await bob.recent(convId, 60);
+    assert.equal(firstPage.length, 60, "a page is bounded");
+    assert.equal(firstPage[59].body.text, "message 149", "and ends at the newest");
+
+    const secondPage = await bob.recent(convId, 120);
+    assert.equal(secondPage.length, 120);
+    assert.equal(secondPage[0].body.text, "message 30", "loading older reaches further back");
+
+    const everything = await bob.recent(convId, 500);
+    assert.equal(everything.length, 150);
+    assert.equal(everything[0].body.text, "message 0");
+  });
+});
+
+test("a reply records what it is replying to", async () => {
+  const convId = await asAlice(async (alice) => (await alice.openDirect(BOB.id)).id);
+  const originalId = await asAlice(async (alice) => {
+    const sent = await alice.send(convId, { text: "what broke the build?" });
+    return sent.id;
+  });
+
+  await asBob(async (bob) => {
+    await bob.send(convId, { text: "a flaky test", replyToId: originalId });
+    const messages = await bob.recent(convId);
+    const reply = messages.find((m) => m.body.replyToId);
+    assert.ok(reply, "the reply link must survive a round trip");
+    assert.equal(reply.body.replyToId, originalId);
+    assert.ok(
+      messages.some((m) => m.id === originalId),
+      "and the quoted message must still be findable"
+    );
+  });
+});
+
+test("an image attachment records its dimensions when the browser can decode it", async () => {
+  // Node has no createImageBitmap, so this asserts the graceful path: the
+  // manifest is still valid, just without a size hint.
+  const convId = await asAlice(async (alice) => {
+    const doc = await alice.openDirect(BOB.id);
+    const png = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    const manifest = await alice.uploadAttachment(doc.id, png);
+    assert.equal(manifest.mime, "image/png");
+    await alice.send(doc.id, { text: "", attachments: [manifest] });
+    return doc.id;
+  });
+
+  await asBob(async (bob) => {
+    const manifest = (await bob.recent(convId))[0].body.attachments[0];
+    const blob = await bob.downloadAttachment(manifest);
+    assert.equal(blob.type, "image/png");
+  });
+});

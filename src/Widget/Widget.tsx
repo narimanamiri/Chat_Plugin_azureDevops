@@ -6,24 +6,20 @@
  * dashboard widget is the closest supported surface: pin it to the team
  * dashboard and the unread count is visible without opening the hub.
  *
- * The widget deliberately does *not* touch key material at all. Unread counts
- * come from `messageCount` on the conversation documents, which is plaintext
- * metadata, so the widget renders correctly without decrypting anything. It
- * shows counts and sender names, never message content.
+ * The widget reads only conversation documents - `messageCount` against the
+ * user's own read cursor - so it never loads a single message page. It shows
+ * counts and sender names, never message content.
  */
 
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 import * as SDK from "azure-devops-extension-sdk";
-import {
-  CommonServiceIds,
-  IHostNavigationService,
-} from "azure-devops-extension-api";
 
 import "../styles.css";
 
 import { getStore } from "@core/storage";
 import { ReadState, type UnreadSummary } from "@core/notifications";
+import { navigateToHub } from "@core/devops";
 import { COLLECTIONS, type ConversationDoc, type ProfileDoc } from "@core/model";
 
 interface WidgetStatus {
@@ -39,20 +35,13 @@ const Widget: React.FC<{ summary?: UnreadSummary; names: Map<string, string>; er
 }) => {
   const total = summary?.total ?? 0;
 
-  const openHub = async () => {
-    const nav = await SDK.getService<IHostNavigationService>(CommonServiceIds.HostNavigationService);
-    // The hub group id is `{publisher}.{extension}.chat-hub-group`; the SDK
-    // gives us the fully qualified contribution id at runtime.
-    const contributionId = SDK.getExtensionContext().id;
-    nav.navigate(`${window.location.origin}${window.location.pathname}`.replace(/\/_dashboards.*$/, "") +
-      `/_apps/hub/${contributionId}.chat-hub`);
-  };
+  const openHub = () => void navigateToHub("chat-hub");
 
   return (
     <div className="sc-widget">
       <div className="sc-widget-head">
         <span aria-hidden="true">{total > 0 ? "🔔" : "🔕"}</span>
-        <span>Secure Chat</span>
+        <span>Team Chat</span>
       </div>
       {error ? (
         <div className="sc-error">{error}</div>

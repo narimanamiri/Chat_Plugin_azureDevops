@@ -1,0 +1,22 @@
+{
+  "0": "Hub UI, i18n, boot",
+  "1": "ChatClient facade + directory",
+  "3": "Azure DevOps SDK + Actions",
+  "4": "Files and encoding",
+  "5": "Store (data service wrapper)",
+  "6": "Test emulator harness",
+  "7": "tsconfig (app)",
+  "8": "Icon generator script",
+  "9": "Test stubs for ADO API",
+  "10": "devDependencies",
+  "11": "dependencies",
+  "12": "tsconfig (tests)",
+  "13": "features.test setup",
+  "14": "package metadata, toolchain",
+  "15": "integration.test setup",
+  "16": "npm scripts",
+  "17": "webpack config",
+  "18": "mentions.test",
+  "19": "fuzz test setup",
+  "20": "stub-api-identities"
+}

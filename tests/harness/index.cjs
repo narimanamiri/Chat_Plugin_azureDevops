@@ -57,6 +57,8 @@ const state = {
   currentDevice: "device-a",
   /** counts every data-service call, so tests can assert on chattiness */
   calls: { get: 0, list: 0, set: 0, delete: 0 },
+  /** per-collection call counts, for asserting that a path stays cheap */
+  byCollection: new Map(),
   /** artificial latency per data-service call, milliseconds */
   latencyMs: 0,
   /** when set, every setDocument rejects with this status */
@@ -94,9 +96,17 @@ const delay = () =>
     ? new Promise((resolve) => setTimeout(resolve, state.latencyMs))
     : Promise.resolve();
 
+function count(collection, kind) {
+  if (!state.byCollection.has(collection)) {
+    state.byCollection.set(collection, { get: 0, list: 0, set: 0, delete: 0 });
+  }
+  state.byCollection.get(collection)[kind]++;
+}
+
 const dataManager = {
   async getDocument(collection, id, options) {
     state.calls.get++;
+    count(collection, "get");
     await delay();
     const doc = bucket(scopeKey(options), collection).get(id);
     if (!doc) throw notFound(`${collection}/${id}`);
@@ -104,11 +114,13 @@ const dataManager = {
   },
   async getDocuments(collection, options) {
     state.calls.list++;
+    count(collection, "list");
     await delay();
     return [...bucket(scopeKey(options), collection).values()].map(clone);
   },
   async setDocument(collection, doc, options) {
     state.calls.set++;
+    count(collection, "set");
     await delay();
     if (state.failWritesWithStatus) {
       const err = new Error(`stubbed failure ${state.failWritesWithStatus}`);
@@ -133,6 +145,7 @@ const dataManager = {
   },
   async deleteDocument(collection, id, options) {
     state.calls.delete++;
+    count(collection, "delete");
     const store = bucket(scopeKey(options), collection);
     if (!store.has(id)) throw notFound(`${collection}/${id}`);
     store.delete(id);
@@ -279,6 +292,7 @@ module.exports.resetWorld = function resetWorld() {
   state.devices = new Map();
   state.teamMembers = new Map();
   state.calls = { get: 0, list: 0, set: 0, delete: 0 };
+  state.byCollection = new Map();
   state.latencyMs = 0;
   state.failWritesWithStatus = 0;
   state.sdkUserHasNoName = false;

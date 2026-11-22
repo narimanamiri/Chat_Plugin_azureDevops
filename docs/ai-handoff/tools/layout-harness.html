@@ -1,0 +1,193 @@
+<!doctype html>
+<!--
+  Static layout harness. NOT shipped. Hand-written copy of the component markup - re-sync when src/Hub/components.tsx changes.
+
+  The real hub cannot run outside an Azure DevOps host frame (SDK.init never
+  resolves), so this reproduces the component markup against the real
+  stylesheet. It exists to measure layout: overflow, bubble bounds, RTL
+  mirroring, and contrast in both themes.
+-->
+<html lang="en" dir="ltr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Team Chat layout harness</title>
+    <link rel="stylesheet" href="../../../src/styles.css" />
+    <style>
+      html, body { height: 100%; margin: 0; }
+      #root { height: 100%; }
+      .harness-bar {
+        position: fixed; z-index: 99; top: 6px; inset-inline-end: 6px;
+        display: flex; gap: 6px; font: 12px system-ui;
+      }
+      .harness-bar button {
+        background: #000; color: #fff; border: 0; padding: 4px 8px; border-radius: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="harness-bar">
+      <button onclick="toggleDir()">dir</button>
+      <button onclick="toggleTheme()">theme</button>
+    </div>
+    <div id="root"></div>
+
+    <script>
+      const EN = {
+        title: "Chat", search: "Search messages", today: "Today",
+        unread: "Unread messages", typing: "Bob Sample is typing",
+        placeholder: "Message", reply: "Reply", members: "4 members",
+        online: "online", loadEarlier: "Load earlier messages",
+      };
+      const FA = {
+        title: "گفتگو", search: "جستجوی پیام‌ها", today: "امروز",
+        unread: "پیام‌های خوانده‌نشده", typing: "باب سمپل در حال نوشتن است",
+        placeholder: "پیام", reply: "پاسخ", members: "۴ عضو",
+        online: "آنلاین", loadEarlier: "پیام‌های قدیمی‌تر",
+      };
+      const BODIES = {
+        en: [
+          "Pushed the fix for the attachment chunking, can you take a look?",
+          "Looking now. Was this the one where a 16 MB upload took twenty seconds?",
+          "That one. Four chunks at a time instead of one, so it is about four times faster.",
+          "Nice. Does the integrity check still catch a truncated upload?",
+        ],
+        fa: [
+          "اصلاح مربوط به تقسیم فایل پیوست را ارسال کردم، می‌توانی نگاه کنی؟",
+          "همین حالا دارم نگاه می‌کنم. همان موردی بود که آپلود ۱۶ مگابایتی بیست ثانیه طول می‌کشید؟",
+          "همان. چهار قطعه هم‌زمان جای یکی، پس حدوداً چهار برابر سریع‌تر شده است.",
+          "خوب است. بررسی سلامت فایل هنوز آپلود ناقص را تشخیص می‌دهد؟",
+        ],
+      };
+
+      const ICON = {
+        compose: "M20.7 3.3a2.4 2.4 0 0 0-3.4 0l-1 1 3.4 3.4 1-1a2.4 2.4 0 0 0 0-3.4zM3 17.2V21h3.8L18 9.8 14.2 6 3 17.2z",
+        bell: "M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6v-5a6 6 0 0 0-5-5.9V4a1 1 0 1 0-2 0v1.1A6 6 0 0 0 6 11v5l-2 2v1h16v-1l-2-2z",
+        attach: "M16.5 6v11.5a4.5 4.5 0 0 1-9 0V5a3 3 0 0 1 6 0v10.5a1.5 1.5 0 0 1-3 0V6H9v9.5a3 3 0 0 0 6 0V5a4.5 4.5 0 0 0-9 0v12.5a6 6 0 0 0 12 0V6h-1.5z",
+        send: "M3 20.5 21 12 3 3.5 3 10l12 2-12 2z",
+        trash: "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+        close: "M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z",
+        reply: "M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z",
+        down: "M12 16.5 4.5 9l1.4-1.4L12 13.7l6.1-6.1L19.5 9z",
+        search: "M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5zm-6 0a4.5 4.5 0 1 1 0-9 4.5 4.5 0 0 1 0 9z",
+        smile: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zM8.5 11a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM12 17.5c2.3 0 4.3-1.4 5-3.5H7c.7 2.1 2.7 3.5 5 3.5z",
+        people: "M16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-8 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 2c-2.7 0-8 1.3-8 4v2h9v-2c0-1.2.5-2.3 1.4-3.2A14 14 0 0 0 8 13zm8 0c-.6 0-1.3 0-2 .2 1.3.9 2 2 2 3.3V19h8v-2c0-2.7-5.3-4-8-4z",
+        globe: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 6h-2.9a15.7 15.7 0 0 0-1.3-3.4A8 8 0 0 1 18.9 8zM12 4c.7 1 1.3 2.3 1.7 4h-3.4C10.7 6.3 11.3 5 12 4zM4.3 14A8 8 0 0 1 4 12c0-.7.1-1.4.3-2h3.3a17 17 0 0 0 0 4H4.3zm.8 2h2.9c.3 1.2.8 2.4 1.3 3.4A8 8 0 0 1 5.1 16zm2.9-8H5.1a8 8 0 0 1 4.2-3.4A15.7 15.7 0 0 0 8 8zM12 20c-.7-1-1.3-2.3-1.7-4h3.4c-.4 1.7-1 3-1.7 4zm2.1-6H9.9a15 15 0 0 1 0-4h4.2a15 15 0 0 1 0 4zm.6 5.4c.5-1 1-2.2 1.3-3.4h2.9a8 8 0 0 1-4.2 3.4zM16.4 14a17 17 0 0 0 0-4h3.3c.2.6.3 1.3.3 2s-.1 1.4-.3 2h-3.3z",
+      };
+
+      const svg = (path, size) =>
+        '<svg width="' + size + '" height="' + size + '" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="' + path + '"/></svg>';
+      const btn = (path, size) => '<button class="sc-icon-btn">' + svg(path, size) + "</button>";
+      const avatar = (initials, c, small, online) =>
+        '<span class="sc-avatar-wrap' + (small ? " sm" : "") + '">' +
+        '<span class="sc-avatar' + (small ? " sm" : "") + " sc-avatar-c" + c + '">' + initials + "</span>" +
+        (online ? '<span class="sc-online-dot"></span>' : "") + "</span>";
+
+      function render() {
+        const rtl = document.documentElement.getAttribute("dir") === "rtl";
+        const S = rtl ? FA : EN;
+        const texts = rtl ? BODIES.fa : BODIES.en;
+        const names = rtl
+          ? ["آلیس اگزمپل", "باب سمپل", "کانال انتشار"]
+          : ["Alice Example", "Bob Sample", "Release channel"];
+        const time = rtl ? "۱۴:۳۲" : "14:32";
+
+        const convs = [0, 1, 2]
+          .map((i) => {
+            const unread = i === 1 ? '<span class="sc-pill">' + (rtl ? "۳" : "3") + "</span>" : "";
+            return (
+              '<button class="sc-conv' + (i === 0 ? " selected" : "") + (i === 1 ? " unread" : "") + '">' +
+              avatar(rtl ? "آا" : "AE", i + 1, false, i === 0) +
+              '<span class="sc-conv-body"><span class="sc-conv-row">' +
+              '<span class="sc-conv-title">' + names[i] + "</span>" +
+              '<span class="sc-conv-time">' + time + "</span></span>" +
+              '<span class="sc-conv-row"><span class="sc-conv-preview">' + texts[i] + "</span>" +
+              unread + "</span></span></button>"
+            );
+          })
+          .join("");
+
+        const bubbles = texts
+          .map((text, i) => {
+            const out = i % 2 === 1;
+            const reactions =
+              i === 2
+                ? '<div class="sc-reactions">' +
+                  '<button class="sc-reaction mine"><span>\u{1F44D}</span><span class="sc-reaction-count">' + (rtl ? "۲" : "2") + "</span></button>" +
+                  '<button class="sc-reaction"><span>\u{1F389}</span><span class="sc-reaction-count">' + (rtl ? "۱" : "1") + "</span></button>" +
+                  "</div>"
+                : "";
+            const quote =
+              i === 1
+                ? '<div class="sc-quote"><span class="sc-quote-author">' + names[0] + "</span>" +
+                  '<span class="sc-quote-text">' + texts[0] + "</span></div>"
+                : "";
+            const unreadLine = i === 3 ? '<div class="sc-unread-line"><span>' + S.unread + "</span></div>" : "";
+            const author = !out ? '<span class="sc-author">' + names[0] + "</span>" : "";
+            return (
+              unreadLine +
+              '<div class="sc-row' + (out ? " out" : "") + ' tail">' +
+              (out ? "" : avatar(rtl ? "آا" : "AE", 1, true)) +
+              '<div class="sc-bubble">' + author + quote +
+              '<div class="sc-text">' + text +
+              ' <a class="sc-chip" href="#"><span class="sc-chip-kind" dir="ltr">#4213</span><span>' +
+              (rtl ? "رفع اشکال آپلود" : "Fix upload stall") + "</span></a></div>" +
+              '<span class="sc-meta">' + (i === 2 ? '<span class="sc-edited">edited</span>' : "") + time + "</span>" +
+              '<span class="sc-bubble-actions">' +
+              "<button>" + svg(ICON.smile, 13) + "</button>" +
+              "<button>" + svg(ICON.reply, 13) + "</button>" +
+              (out ? "<button>" + svg(ICON.compose, 13) + "</button><button>" + svg(ICON.trash, 13) + "</button>" : "") +
+              "</span>" + reactions + "</div></div>"
+            );
+          })
+          .join("");
+
+        document.getElementById("root").innerHTML =
+          '<div class="sc-app">' +
+          '<nav class="sc-sidebar">' +
+          '<div class="sc-sidebar-head"><span class="sc-sidebar-title">' + S.title + "</span>" +
+          '<button class="sc-icon-btn"><span class="sc-hash">#</span></button>' + btn(ICON.compose, 19) + "</div>" +
+          '<div class="sc-search">' + svg(ICON.search, 16) +
+          '<input type="search" placeholder="' + S.search + '" />' + "</div>" +
+          '<div class="sc-conv-scroll">' + convs + "</div></nav>" +
+
+          '<main class="sc-main">' +
+          '<header class="sc-topbar">' + avatar(rtl ? "آا" : "AE", 1, true, true) +
+          '<div class="sc-topbar-text"><div class="sc-topbar-title">' + names[0] + "</div>" +
+          '<div class="sc-topbar-sub">' + S.online + "</div></div>" +
+          '<span class="sc-spacer"></span>' +
+          '<button class="sc-icon-btn">' + svg(ICON.globe, 19) + '<span class="sc-lang-tag">' + (rtl ? "FA" : "EN") + "</span></button>" +
+          '<button class="sc-icon-btn">' + svg(ICON.bell, 20) + '<span class="sc-badge">' + (rtl ? "۷" : "7") + "</span></button>" +
+          btn(ICON.people, 19) + btn(ICON.trash, 18) + "</header>" +
+
+          '<div class="sc-messages-wrap"><div class="sc-messages" role="log">' +
+          '<button class="sc-load-older">' + S.loadEarlier + "</button>" +
+          '<div class="sc-day">' + S.today + "</div>" + bubbles +
+          "</div>" +
+          '<div class="sc-typing"><span class="sc-typing-dots"><i></i><i></i><i></i></span>' + S.typing + "</div>" +
+          '<button class="sc-jump">' + svg(ICON.down, 20) + "</button></div>" +
+
+          '<div class="sc-composer">' +
+          '<div class="sc-reply-bar"><span class="sc-reply-text"><strong>' + names[1] + "</strong> " + texts[1] + "</span>" +
+          '<button class="sc-icon-btn">' + svg(ICON.close, 14) + "</button></div>" +
+          '<div class="sc-composer-inner"><div class="sc-composer-box">' +
+          '<label class="sc-icon-btn sc-attach-label">' + svg(ICON.attach, 20) + "</label>" +
+          '<textarea rows="1" placeholder="' + S.placeholder + '"></textarea></div>' +
+          '<button class="sc-send">' + svg(ICON.send, 20) + "</button></div></div>" +
+          "</main></div>";
+      }
+
+      function toggleDir() {
+        const rtl = document.documentElement.getAttribute("dir") === "rtl";
+        document.documentElement.setAttribute("dir", rtl ? "ltr" : "rtl");
+        document.documentElement.setAttribute("lang", rtl ? "en" : "fa");
+        render();
+      }
+      function toggleTheme() {
+        const dark = document.documentElement.getAttribute("data-theme") === "dark";
+        document.documentElement.setAttribute("data-theme", dark ? "light" : "dark");
+      }
+      document.documentElement.setAttribute("data-theme", "light");
+      render();
+    </script>
+  </body>
+</html>

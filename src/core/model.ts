@@ -47,6 +47,33 @@ export const CHUNK_BYTES = 64 * 1024;
 /** Refuse to attach anything larger than this. */
 export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 
+/** Attachment chunks written or read at once. */
+export const CHUNK_CONCURRENCY = 4;
+
+/** A typing flag older than this is ignored and pruned. */
+export const TYPING_TTL_MS = 8000;
+
+/** Do not publish typing state above this member count. */
+export const TYPING_MAX_MEMBERS = 12;
+
+/** Minimum gap between two typing writes from one client. */
+export const TYPING_WRITE_MS = 3500;
+
+/** Minimum gap between two lastSeenAt writes from one client. */
+export const PRESENCE_WRITE_MS = 5 * 60 * 1000;
+
+/** Someone seen more recently than this is shown as online. */
+export const PRESENCE_FRESH_MS = 6 * 60 * 1000;
+
+/**
+ * The reactions the picker offers.
+ *
+ * Deliberately a short fixed list. Every reaction rewrites the page
+ * document it lives in, and an open-ended emoji keyboard invites a reaction
+ * per message, which would make page documents churn.
+ */
+export const REACTION_EMOJI = ["👍", "🎉", "❤️", "😂", "👀", "🚀"] as const;
+
 /* ------------------------------------------------------------------ */
 /* stored documents                                                    */
 /* ------------------------------------------------------------------ */
@@ -71,6 +98,15 @@ export interface ProfileDoc extends StoredDoc {
   appVersion?: string;
   namespace?: string;
   updatedAt: string;
+  /**
+   * Last time this person had the chat open, coarse on purpose.
+   *
+   * Written at most once every PRESENCE_WRITE_MS, so it costs one small
+   * write per user per few minutes rather than a heartbeat. It is a
+   * courtesy signal, not a reliable presence system: a closed tab simply
+   * stops updating it, and nothing marks the user offline.
+   */
+  lastSeenAt?: string;
 }
 
 export type ConversationKind = "dm" | "channel" | "workitem" | "commit";
@@ -89,8 +125,26 @@ export interface ConversationDoc extends StoredDoc {
   lastActivityAt: string;
   lastMessageId?: string;
   lastSenderId?: string;
+  /**
+   * First line of the most recent message, for the conversation list.
+   * Truncated on write so the conversation document stays small.
+   */
+  lastPreview?: string;
   /** Set for `workitem` / `commit` conversations. */
   subject?: ConversationSubject;
+  /**
+   * Who is typing, as userId -> ISO timestamp.
+   *
+   * This lives on the conversation document rather than in a collection of
+   * its own because that document is already read on every fast poll tick,
+   * so the indicator costs no extra read. Entries older than TYPING_TTL_MS
+   * are ignored by readers and pruned by the next writer.
+   *
+   * Only written in conversations with at most TYPING_MAX_MEMBERS members:
+   * in a large channel the write contention on this one hot document is
+   * not worth a cosmetic feature.
+   */
+  typing?: Record<string, string>;
 }
 
 export interface ConversationSubject {
@@ -124,6 +178,15 @@ export interface StoredMessage {
   body: MessageBody;
   /** Tombstone marker. Content is gone, the slot stays for ordering. */
   deleted?: boolean;
+  /**
+   * Emoji -> the users who reacted with it.
+   *
+   * Stored on the message rather than in documents of its own so a reaction
+   * costs no extra read: the page document is already being fetched. The
+   * trade-off is a write to the whole page document per reaction, which is
+   * why the emoji set is small and fixed.
+   */
+  reactions?: Record<string, string[]>;
 }
 
 /** Attachment chunk. Collection scope, id = `${blobId}_${index}`. */
@@ -170,6 +233,9 @@ export interface AttachmentManifest {
   chunkBytes: number;
   /** SHA-256 of the file, for an integrity check on download. */
   sha256: string;
+  /** Pixel size for images, so a preview reserves its space before loading. */
+  width?: number;
+  height?: number;
 }
 
 export interface MessageBody {
@@ -192,6 +258,14 @@ export interface DecryptedMessage {
   deleted?: boolean;
   pending?: boolean;
   failed?: string;
+  reactions?: Record<string, string[]>;
+}
+
+/** One hit from a message search. */
+export interface SearchHit {
+  convId: string;
+  convTitle: string;
+  message: DecryptedMessage;
 }
 
 /** A conversation with unread state applied. */
@@ -203,5 +277,6 @@ export interface ConversationView {
   unread: number;
   lastActivityAt: string;
   lastSenderId?: string;
+  lastPreview?: string;
   subject?: ConversationSubject;
 }

@@ -17,6 +17,8 @@ import {
   ConversationKind,
   ConversationSubject,
   ConversationView,
+  TYPING_MAX_MEMBERS,
+  TYPING_TTL_MS,
 } from "./model";
 import { Store } from "./storage";
 
@@ -29,6 +31,26 @@ export const dmId = (a: string, b: string): string =>
 
 export const subjectId = (subject: ConversationSubject): string =>
   hashId(`${subject.type}|${subject.repositoryId ?? ""}|${subject.key}`, 16);
+
+/**
+ * Who is currently typing, ignoring anything stale.
+ *
+ * A pure function of the document, so the UI never has to decide what
+ * "recent" means and a test can check the TTL without touching a clock.
+ */
+export function activeTypers(
+  conv: Pick<ConversationDoc, "typing">,
+  exclude: string,
+  now = Date.now()
+): string[] {
+  const out: string[] = [];
+  for (const [userId, at] of Object.entries(conv.typing ?? {})) {
+    if (userId === exclude) continue;
+    const stamp = Date.parse(at);
+    if (Number.isFinite(stamp) && now - stamp < TYPING_TTL_MS) out.push(userId);
+  }
+  return out.sort();
+}
 
 export class Conversations {
   constructor(
@@ -49,7 +71,16 @@ export class Conversations {
     const all = await this.list();
     return all
       .filter((c) => c.members.includes(this.userId))
-      .sort((a, b) => (a.lastActivityAt < b.lastActivityAt ? 1 : -1));
+      // Most recent first, with a stable tie-break. A comparator that never
+      // returns 0 is inconsistent, and conversations created in the same
+      // millisecond then come back in a different order on every call.
+      .sort((a, b) =>
+        a.lastActivityAt === b.lastActivityAt
+          ? a.id.localeCompare(b.id)
+          : a.lastActivityAt < b.lastActivityAt
+            ? 1
+            : -1
+      );
   }
 
   get(id: string): Promise<ConversationDoc | undefined> {
@@ -156,6 +187,50 @@ export class Conversations {
     return updated;
   }
 
+  /**
+   * Publish or clear our own typing flag.
+   *
+   * Writes to the conversation document, which is the same document a
+   * message append contends for - so this is skipped in large channels and
+   * the caller is expected to throttle. A write that loses its race is not
+   * worth retrying, hence the single attempt and the swallowed error: a
+   * missing typing dot must never surface as a failure to the user.
+   */
+  async setTyping(convId: string, active: boolean): Promise<void> {
+    try {
+      await this.store.mutate<ConversationDoc>(
+        COLLECTIONS.conversations,
+        convId,
+        (current) => {
+          if (!current) return null;
+          if (current.members.length > TYPING_MAX_MEMBERS) return null;
+
+          const now = Date.now();
+          const typing: Record<string, string> = {};
+          for (const [userId, at] of Object.entries(current.typing ?? {})) {
+            if (userId === this.userId) continue;
+            const stamp = Date.parse(at);
+            // Prune on write: nobody else will tidy up after a closed tab.
+            if (Number.isFinite(stamp) && now - stamp < TYPING_TTL_MS) typing[userId] = at;
+          }
+          if (active) typing[this.userId] = new Date(now).toISOString();
+
+          const before = JSON.stringify(current.typing ?? {});
+          const after = JSON.stringify(typing);
+          if (before === after) return null;
+
+          // NB: lastActivityAt is deliberately untouched. Typing must not
+          // reorder the conversation list or look like activity.
+          return { ...current, typing };
+        },
+        "collection",
+        1
+      );
+    } catch (err) {
+      console.warn("[team-chat] typing flag not published", err);
+    }
+  }
+
   async rename(convId: string, title: string): Promise<void> {
     await this.store.mutate<ConversationDoc>(COLLECTIONS.conversations, convId, (current) =>
       current ? { ...current, title } : null
@@ -194,6 +269,7 @@ export class Conversations {
       unread,
       lastActivityAt: conv.lastActivityAt,
       lastSenderId: conv.lastSenderId,
+      lastPreview: conv.lastPreview,
       subject: conv.subject,
     };
   }
